@@ -61,6 +61,11 @@ type PodManager struct {
 	pulledTimes   map[string]metav1.Time // image pulled time
 	runTimes      map[string]metav1.Time // container(s) become running
 
+	scheduleTimesFromConditions map[string]metav1.Time // timestamp for pod schedule event
+	initTimesFromConditions map[string]metav1.Time // timestamp for pod schedule event
+	readyTimesFromConditions map[string]metav1.Time // timestamp for pod schedule event
+	startTimesFromPod map[string]metav1.Time // timestamp for pod schedule event
+
 	// Maps to store client times (based on PodConditionType) with higher precision
 	cFirstTimes  map[string]metav1.Time // client sees the first add/update
 	cSchedTimes  map[string]metav1.Time // client sees PodScheduled == True
@@ -103,6 +108,13 @@ type PodManager struct {
 	createToRunLatency, firstToSchedLatency   perf_util.OperationLatencyMetric
 	schedToInitdLatency, initdToReadyLatency  perf_util.OperationLatencyMetric
 	firstToReadyLatency, createToReadyLatency perf_util.OperationLatencyMetric
+
+	createToScheduleFromConditions  perf_util.OperationLatencyMetric
+	scheduleToStartFromConditions  perf_util.OperationLatencyMetric
+	scheduleToInitialisedFromConditions  perf_util.OperationLatencyMetric
+	startToReadyFromConditions  perf_util.OperationLatencyMetric
+	totalCreateLatencyFromCondition  perf_util.OperationLatencyMetric
+
 }
 
 func NewPodManager() Manager {
@@ -116,6 +128,12 @@ func NewPodManager() Manager {
 	cst := make(map[string]metav1.Time, 0)
 	cit := make(map[string]metav1.Time, 0)
 	crt := make(map[string]metav1.Time, 0)
+
+	scheduleTimesFromConditions := make(map[string]metav1.Time, 0)
+	initTimesFromConditions := make(map[string]metav1.Time, 0)
+	readyTimesFromConditions := make(map[string]metav1.Time, 0)
+	startTimesFromPod := make(map[string]metav1.Time, 0)
+
 
 	apt := make(map[string][]time.Duration, 0)
 
@@ -139,6 +157,11 @@ func NewPodManager() Manager {
 		startTimes:    stt,
 		pulledTimes:   put,
 		runTimes:      rut,
+
+		scheduleTimesFromConditions: scheduleTimesFromConditions,
+		initTimesFromConditions: initTimesFromConditions,
+		readyTimesFromConditions: readyTimesFromConditions,
+		startTimesFromPod: startTimesFromPod,
 
 		cFirstTimes:  cft,
 		cSchedTimes:  cst,
@@ -272,6 +295,40 @@ func (mgr *PodManager) initCache(resourceType string) {
 	)
 	//mgr.podController = &controller
 	go mgr.podController.Run(mgr.podChan)
+}
+
+func (mgr *PodManager) UpdatePodMetricsBasedOnConditions(pod apiv1.Pod) {
+	log.Infof("UpdatePodMetricsBasedOnConditions: processing %v", pod.Name)
+	podConditions := pod.Status.Conditions
+	log.Infof("UpdatePodMetricsBasedOnConditions: processing %v creation timestamp %v",
+		pod.Name, pod.CreationTimestamp)
+
+	mgr.createTimes[pod.Name] = pod.CreationTimestamp
+	if pod.Status.StartTime != nil {
+		mgr.startTimesFromPod[pod.Name] = *pod.Status.StartTime
+	}
+
+	for _, cond := range podConditions {
+		log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v status %s",
+			pod.Name, cond.Type, cond.LastTransitionTime, cond.Status)
+		if cond.Status != apiv1.ConditionTrue {
+			continue;
+		}
+		if cond.Type == apiv1.PodScheduled {
+			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating sched timestamp",
+				pod.Name, cond.Type, cond.LastTransitionTime)
+			mgr.scheduleTimesFromConditions[pod.Name] = cond.LastTransitionTime
+		} else if cond.Type ==  apiv1.PodInitialized {
+			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating init timestamp",
+				pod.Name, cond.Type, cond.LastTransitionTime)
+			mgr.initTimesFromConditions[pod.Name] = cond.LastTransitionTime
+		} else if cond.Type ==  apiv1.PodReady {
+			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating ready timestamp",
+				pod.Name, cond.Type, cond.LastTransitionTime)
+			mgr.readyTimesFromConditions[pod.Name] = cond.LastTransitionTime
+		}
+	}
+	log.Infof("UpdatePodMetricsBasedOnConditions: processing done - %v", pod.Name)
 }
 
 /*
@@ -708,6 +765,7 @@ func (mgr *PodManager) Delete(n interface{}) error {
 			if _, ok := mgr.scheduleTimes[currPod.Name]; !ok {
 				mgr.UpdateBeforeDeletion(currPod.Name, ns)
 			}
+			mgr.UpdatePodMetricsBasedOnConditions(currPod)
 
 			// Delete the pod
 			startTime := metav1.Now()
@@ -791,11 +849,70 @@ func (mgr *PodManager) LogStats() {
 	log.Infof("%-50v %-10v", "Pod creation average latency:",
 		mgr.podAvgLatency)
 
+	log.Infof("------ Pod latencies based on conditions/pod attributes and hence less granular (seconds) ------")
+	log.Infof("%-50v %-10v %-10v %-10v %-10v", " ", "median", "min", "max", "99%")
+
+	var latency perf_util.OperationLatencyMetric
+
+	latency = mgr.createToScheduleFromConditions
+	if latency.Valid {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod create to scheduling latency stats (server): ",
+			latency.Latency.Mid, latency.Latency.Min, latency.Latency.Max, latency.Latency.P99)
+	} else {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod create to scheduling latency stats (server): ",
+			"---", "---", "---", "---")
+	}
+
+	latency = mgr.scheduleToStartFromConditions
+	if latency.Valid {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod schedule to start latency stats (server): ",
+			latency.Latency.Mid, latency.Latency.Min, latency.Latency.Max, latency.Latency.P99)
+	} else {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod schedule to start latency stats (server): ",
+			"---", "---", "---", "---")
+	}
+
+	latency = mgr.scheduleToInitialisedFromConditions
+	if latency.Valid {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod schedule to init latency stats (server): ",
+			latency.Latency.Mid, latency.Latency.Min, latency.Latency.Max, latency.Latency.P99)
+	} else {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod schedule to init latency stats (server): ",
+			"---", "---", "---", "---")
+	}
+
+	latency = mgr.startToReadyFromConditions
+	if latency.Valid {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod start to ready latency stats (server): ",
+			latency.Latency.Mid, latency.Latency.Min, latency.Latency.Max, latency.Latency.P99)
+	} else {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod start to ready latency stats (server): ",
+			"---", "---", "---", "---")
+	}
+
+	latency = mgr.totalCreateLatencyFromCondition
+	if latency.Valid {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod total (create to ready) latency stats (server): ",
+			latency.Latency.Mid, latency.Latency.Min, latency.Latency.Max, latency.Latency.P99)
+	} else {
+		log.Infof("%-50v %-10v %-10v %-10v %-10v",
+			"Pod total (create to ready) latency stats (server): ",
+			"---", "---", "---", "---")
+	}
+
 	log.Infof("--------------------------------- Pod Startup Latencies (ms) " +
 		"---------------------------------")
 	log.Infof("%-50v %-10v %-10v %-10v %-10v", " ", "median", "min", "max", "99%")
 
-	var latency perf_util.OperationLatencyMetric
 	latency = mgr.createToScheLatency
 	if latency.Valid {
 		log.Infof("%-50v %-10v %-10v %-10v %-10v",
@@ -1143,6 +1260,44 @@ func (mgr *PodManager) CalculateStats() {
 
 	createToReady := make([]time.Duration, 0)
 
+	createToScheduleFromConditions := make([]time.Duration, 0)
+	scheduleToStartFromConditions := make([]time.Duration, 0)
+	scheduleToInitialisedFromConditions := make([]time.Duration, 0)
+	startToReadyFromConditions := make([]time.Duration, 0)
+	totalCreateLatencyFromCondition := make([]time.Duration, 0)
+
+
+	for p, ct := range mgr.createTimes {
+		log.Infof("scheduleTimesFromConditions: %v", mgr.scheduleTimesFromConditions)
+		if st, ok := mgr.scheduleTimesFromConditions[p]; ok {
+			createToScheduleFromConditions = append(createToScheduleFromConditions, st.Time.Sub(ct.Time))
+		}
+	}
+
+	for p, ct := range mgr.scheduleTimesFromConditions {
+		if st, ok := mgr.startTimesFromPod[p]; ok {
+			scheduleToStartFromConditions = append(scheduleToStartFromConditions, st.Time.Sub(ct.Time))
+		}
+	}
+
+	for p, ct := range mgr.scheduleTimesFromConditions {
+		if st, ok := mgr.initTimesFromConditions[p]; ok {
+			scheduleToInitialisedFromConditions = append(scheduleToInitialisedFromConditions, st.Time.Sub(ct.Time))
+		}
+	}
+
+	for p, ct := range mgr.startTimesFromPod {
+		if st, ok := mgr.readyTimesFromConditions[p]; ok {
+			startToReadyFromConditions = append(startToReadyFromConditions, st.Time.Sub(ct.Time))
+		}
+	}
+
+	for p, ct := range mgr.createTimes {
+		if st, ok := mgr.readyTimesFromConditions[p]; ok {
+			totalCreateLatencyFromCondition = append(totalCreateLatencyFromCondition, st.Time.Sub(ct.Time))
+		}
+	}
+
 	for p, ct := range mgr.createTimes {
 		if st, ok := mgr.scheduleTimes[p]; ok {
 			createToSche = append(createToSche, st.Time.Sub(ct.Time))
@@ -1201,6 +1356,17 @@ func (mgr *PodManager) CalculateStats() {
 		}
 	}
 
+	sort.Slice(createToScheduleFromConditions,
+		func(i, j int) bool { return createToScheduleFromConditions[i] < createToScheduleFromConditions[j] })
+	sort.Slice(scheduleToStartFromConditions,
+		func(i, j int) bool { return scheduleToStartFromConditions[i] < scheduleToStartFromConditions[j] })
+	sort.Slice(scheduleToInitialisedFromConditions,
+		func(i, j int) bool { return scheduleToInitialisedFromConditions[i] < scheduleToInitialisedFromConditions[j] })
+	sort.Slice(startToReadyFromConditions,
+		func(i, j int) bool { return startToReadyFromConditions[i] < startToReadyFromConditions[j] })
+	sort.Slice(totalCreateLatencyFromCondition,
+		func(i, j int) bool { return totalCreateLatencyFromCondition[i] < totalCreateLatencyFromCondition[j] })
+
 	sort.Slice(createToSche,
 		func(i, j int) bool { return createToSche[i] < createToSche[j] })
 	sort.Slice(scheToStart,
@@ -1223,6 +1389,58 @@ func (mgr *PodManager) CalculateStats() {
 		func(i, j int) bool { return createToReady[i] < createToReady[j] })
 
 	var mid, min, max, p99 float32
+
+	if len(createToScheduleFromConditions) > 0 {
+		mid = float32(createToScheduleFromConditions[len(createToScheduleFromConditions)/2]) / float32(time.Second)
+		min = float32(createToScheduleFromConditions[0]) / float32(time.Second)
+		max = float32(createToScheduleFromConditions[len(createToScheduleFromConditions)-1]) / float32(time.Second)
+		p99 = float32(createToScheduleFromConditions[len(createToScheduleFromConditions)-1-len(createToScheduleFromConditions)/100]) /
+			float32(time.Second)
+		mgr.createToScheduleFromConditions.Valid = true
+		mgr.createToScheduleFromConditions.Latency = perf_util.LatencyMetric{mid, min, max, p99}
+	} else {
+		log.Errorf("createToScheduleFromConditions is empty")
+	}
+
+	if len(scheduleToStartFromConditions) > 0 {
+		mid = float32(scheduleToStartFromConditions[len(scheduleToStartFromConditions)/2]) / float32(time.Second)
+		min = float32(scheduleToStartFromConditions[0]) / float32(time.Second)
+		max = float32(scheduleToStartFromConditions[len(scheduleToStartFromConditions)-1]) / float32(time.Second)
+		p99 = float32(scheduleToStartFromConditions[len(scheduleToStartFromConditions)-1-len(scheduleToStartFromConditions)/100]) /
+			float32(time.Second)
+		mgr.scheduleToStartFromConditions.Valid = true
+		mgr.scheduleToStartFromConditions.Latency = perf_util.LatencyMetric{mid, min, max, p99}
+	}
+
+	if len(scheduleToInitialisedFromConditions) > 0 {
+		mid = float32(scheduleToInitialisedFromConditions[len(scheduleToInitialisedFromConditions)/2]) / float32(time.Second)
+		min = float32(scheduleToInitialisedFromConditions[0]) / float32(time.Second)
+		max = float32(scheduleToInitialisedFromConditions[len(scheduleToInitialisedFromConditions)-1]) / float32(time.Second)
+		p99 = float32(scheduleToInitialisedFromConditions[len(scheduleToInitialisedFromConditions)-1-len(scheduleToInitialisedFromConditions)/100]) /
+			float32(time.Second)
+		mgr.scheduleToInitialisedFromConditions.Valid = true
+		mgr.scheduleToInitialisedFromConditions.Latency = perf_util.LatencyMetric{mid, min, max, p99}
+	}
+
+	if len(startToReadyFromConditions) > 0 {
+		mid = float32(startToReadyFromConditions[len(startToReadyFromConditions)/2]) / float32(time.Second)
+		min = float32(startToReadyFromConditions[0]) / float32(time.Second)
+		max = float32(startToReadyFromConditions[len(startToReadyFromConditions)-1]) / float32(time.Second)
+		p99 = float32(startToReadyFromConditions[len(startToReadyFromConditions)-1-len(startToReadyFromConditions)/100]) /
+			float32(time.Second)
+		mgr.startToReadyFromConditions.Valid = true
+		mgr.startToReadyFromConditions.Latency = perf_util.LatencyMetric{mid, min, max, p99}
+	}
+
+	if len(totalCreateLatencyFromCondition) > 0 {
+		mid = float32(totalCreateLatencyFromCondition[len(totalCreateLatencyFromCondition)/2]) / float32(time.Second)
+		min = float32(totalCreateLatencyFromCondition[0]) / float32(time.Second)
+		max = float32(totalCreateLatencyFromCondition[len(totalCreateLatencyFromCondition)-1]) / float32(time.Second)
+		p99 = float32(totalCreateLatencyFromCondition[len(totalCreateLatencyFromCondition)-1-len(totalCreateLatencyFromCondition)/100]) /
+			float32(time.Second)
+		mgr.totalCreateLatencyFromCondition.Valid = true
+		mgr.totalCreateLatencyFromCondition.Latency = perf_util.LatencyMetric{mid, min, max, p99}
+	}
 
 	if len(createToSche) > 0 {
 		mid = float32(createToSche[len(createToSche)/2]) / float32(time.Millisecond)
