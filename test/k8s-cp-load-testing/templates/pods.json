@@ -1,0 +1,37 @@
+{
+	"BlockingLevel": "operation",
+	"Timeout": $MAX_POD_TIMEOUT,
+	"CheckingInterval": 3000,
+	"Cleanup": true,
+	"Operations": [
+		{
+			"Pods": {
+				"Actions": [
+					{
+						"Act": "CREATE",
+						"Spec": {
+							"ImagePullPolicy": "IfNotPresent",
+							"Image": "k8s.gcr.io/pause:3.1"
+						}
+					},
+					{
+						"Act": "LIST"
+					},
+					{
+						"Act": "GET"
+					}
+				],
+				"SleepTimes": [
+					$MAX_POD_TIMEOUT,
+					300,
+					300,
+					3000,
+					0
+				],
+				"Count": ${PODS},
+				"ContainerNamePrefix": "data-plane-"
+			},
+			"RepeatTimes": 0
+		}
+	]
+}

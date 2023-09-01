@@ -45,7 +45,7 @@ install () {
 
     #$MY_GOROOT/bin/go install cmd/kbench.go
     #go build ./kbench
-    cp $MY_GOPATH/bin/kbench /usr/local/bin/
+    sudo cp $MY_GOPATH/bin/kbench /usr/local/bin/
     if [ $? -ne 0 ]; then
         echo "Tried to copy kbench to /usr/local/bin but failed. If you are not root, run from $MY_GOPATH/bin/kbench"
     fi

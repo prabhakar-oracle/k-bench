@@ -443,7 +443,7 @@ func runPodActions(
 		}
 
 		// TODO: add optional status checking logic here
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -576,7 +576,7 @@ func runDeploymentActions(
 			}
 		}
 
-		if si < len(sleepTimes) {
+		if (si < len(sleepTimes)) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -709,7 +709,7 @@ func runStatefulSetActions(
 			}
 		}
 
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -787,7 +787,7 @@ func runNamespaceActions(
 		}
 
 		// TODO: add optional status checking logic here
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -896,7 +896,7 @@ func runServiceActions(
 		}
 
 		// TODO: add optional status checking logic here
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -1022,7 +1022,7 @@ func runRcActions(
 		}
 
 		// TODO: add optional status checking logic here
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++
@@ -1118,7 +1118,7 @@ func runResourceActions(
 		}
 
 		// TODO: add optional status checking logic here
-		if si < len(sleepTimes) {
+		if si < len(sleepTimes) && (sleepTimes[si] > 0) {
 			log.Infof("Sleep %v mili-seconds after %v action", sleepTimes[si], action.Act)
 			time.Sleep(time.Duration(sleepTimes[si]) * time.Millisecond)
 			si++

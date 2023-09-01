@@ -300,8 +300,6 @@ func (mgr *PodManager) initCache(resourceType string) {
 func (mgr *PodManager) UpdatePodMetricsBasedOnConditions(pod apiv1.Pod) {
 	log.Infof("UpdatePodMetricsBasedOnConditions: processing %v", pod.Name)
 	podConditions := pod.Status.Conditions
-	log.Infof("UpdatePodMetricsBasedOnConditions: processing %v creation timestamp %v",
-		pod.Name, pod.CreationTimestamp)
 
 	mgr.createTimes[pod.Name] = pod.CreationTimestamp
 	if pod.Status.StartTime != nil {
@@ -309,22 +307,14 @@ func (mgr *PodManager) UpdatePodMetricsBasedOnConditions(pod apiv1.Pod) {
 	}
 
 	for _, cond := range podConditions {
-		log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v status %s",
-			pod.Name, cond.Type, cond.LastTransitionTime, cond.Status)
 		if cond.Status != apiv1.ConditionTrue {
 			continue;
 		}
 		if cond.Type == apiv1.PodScheduled {
-			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating sched timestamp",
-				pod.Name, cond.Type, cond.LastTransitionTime)
 			mgr.scheduleTimesFromConditions[pod.Name] = cond.LastTransitionTime
 		} else if cond.Type ==  apiv1.PodInitialized {
-			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating init timestamp",
-				pod.Name, cond.Type, cond.LastTransitionTime)
 			mgr.initTimesFromConditions[pod.Name] = cond.LastTransitionTime
 		} else if cond.Type ==  apiv1.PodReady {
-			log.Infof("UpdatePodMetricsBasedOnConditions: processing %v condition %v ts %v updating ready timestamp",
-				pod.Name, cond.Type, cond.LastTransitionTime)
 			mgr.readyTimesFromConditions[pod.Name] = cond.LastTransitionTime
 		}
 	}
@@ -338,35 +328,33 @@ func (mgr *PodManager) UpdateBeforeDeletion(name string, ns string) {
 	// Before deletion, make sure schedule and pulled time retrieved for this pod
 	// As deletes may happen in multi-threaded section, need to protect the update
 	mgr.statsMutex.Lock()
-	if _, ok := mgr.scheduleTimes[name]; !ok {
-		selector := fields.Set{
-			"involvedObject.kind":      "Pod",
-			"involvedObject.namespace": ns,
-			//"source":                   apiv1.DefaultSchedulerName,
-		}.AsSelector().String()
-		options := metav1.ListOptions{FieldSelector: selector}
-		//TODO: move the below statement out side the lock?
-		events, err := mgr.client.CoreV1().Events("").List(options)
-		if err != nil {
-			log.Error(err)
-		} else {
-			scheEvents := make(map[string]metav1.Time, 0)
-			pulledEvents := make(map[string]metav1.Time, 0)
-			for _, event := range events.Items {
-				if event.Source.Component == apiv1.DefaultSchedulerName {
-					scheEvents[event.InvolvedObject.Name] = event.FirstTimestamp
-				} else if event.Reason == "Pulled" {
-					pulledEvents[event.InvolvedObject.Name] = event.FirstTimestamp
-				}
+	selector := fields.Set{
+		"involvedObject.kind":      "Pod",
+		"involvedObject.namespace": ns,
+		//"source":                   apiv1.DefaultSchedulerName,
+	}.AsSelector().String()
+	options := metav1.ListOptions{FieldSelector: selector}
+	//TODO: move the below statement out side the lock?
+	events, err := mgr.client.CoreV1().Events("").List(options)
+	if err != nil {
+		log.Error(err)
+	} else {
+		scheEvents := make(map[string]metav1.Time, 0)
+		pulledEvents := make(map[string]metav1.Time, 0)
+		for _, event := range events.Items {
+			if event.Source.Component == apiv1.DefaultSchedulerName {
+				scheEvents[event.InvolvedObject.Name] = event.FirstTimestamp
+			} else if event.Reason == "Pulled" {
+				pulledEvents[event.InvolvedObject.Name] = event.FirstTimestamp
 			}
+		}
 
-			for k := range mgr.createTimes {
-				if _, sche_exist := scheEvents[k]; sche_exist {
-					mgr.scheduleTimes[k] = scheEvents[k]
-				}
-				if _, pull_exist := scheEvents[k]; pull_exist {
-					mgr.pulledTimes[k] = pulledEvents[k]
-				}
+		for k := range mgr.createTimes {
+			if _, sche_exist := scheEvents[k]; sche_exist {
+				mgr.scheduleTimes[k] = scheEvents[k]
+			}
+			if _, pull_exist := scheEvents[k]; pull_exist {
+				mgr.pulledTimes[k] = pulledEvents[k]
 			}
 		}
 	}
@@ -730,6 +718,45 @@ func (mgr *PodManager) Update(n interface{}) error {
 	return nil
 }
 
+func (mgr *PodManager) DeleteAllPods(n interface{}) error {
+	switch s := n.(type) {
+	default:
+		log.Errorf("Invalid spec %T for Pod delete action.", s)
+		return fmt.Errorf("Invalid spec %T for Pod delete action.", s)
+	case ActionSpec:
+		cid := s.Tid % len(mgr.clientsets)
+
+		filters := make(map[string]string, 0)
+		filters["app"] = "kbench"
+		selector := labels.Set(filters).AsSelector().String()
+		options := metav1.ListOptions{LabelSelector: selector}
+
+		ns := mgr.namespace
+
+		if s.Namespace != "" {
+			ns = s.Namespace
+		}
+
+		pods := make([]apiv1.Pod, 0)
+
+		// podList, err := mgr.clientsets[cid].CoreV1().Pods(ns).List(options)
+		podList, err := mgr.clientsets[cid].CoreV1().Pods(ns).List(options)
+		if err != nil {
+			return err
+		}
+		pods = podList.Items
+
+		mgr.UpdateBeforeDeletion("", ns)
+
+		for _, currPod := range pods {
+			log.Infof("-->Deleting pod %v", currPod.Name)
+			mgr.statsMutex.Lock()
+			mgr.UpdatePodMetricsBasedOnConditions(currPod)
+			mgr.statsMutex.Unlock()
+		}
+		return nil
+	}
+}
 /*
  * This function implements the DELETE action.
  */
@@ -760,30 +787,11 @@ func (mgr *PodManager) Delete(n interface{}) error {
 		}
 		pods = podList.Items
 
+		mgr.UpdateBeforeDeletion("", ns)
+
 		for _, currPod := range pods {
 			log.Infof("Deleting pod %v", currPod.Name)
-			if _, ok := mgr.scheduleTimes[currPod.Name]; !ok {
-				mgr.UpdateBeforeDeletion(currPod.Name, ns)
-			}
 			mgr.UpdatePodMetricsBasedOnConditions(currPod)
-
-			// Delete the pod
-			startTime := metav1.Now()
-			mgr.clientsets[cid].CoreV1().Pods(ns).Delete(currPod.Name, nil)
-			latency := metav1.Now().Time.Sub(startTime.Time).Round(time.Microsecond)
-
-			mgr.alMutex.Lock()
-			mgr.apiTimes[DELETE_ACTION] = append(mgr.apiTimes[DELETE_ACTION], latency)
-			mgr.alMutex.Unlock()
-
-			mgr.podMutex.Lock()
-			// Delete it from the pod set
-			_, ok := mgr.podNs[currPod.Name]
-
-			if ok {
-				delete(mgr.podNs, currPod.Name)
-			}
-			mgr.podMutex.Unlock()
 		}
 	}
 	return nil
@@ -794,19 +802,21 @@ func (mgr *PodManager) Delete(n interface{}) error {
  * all the resources that are created by the pod manager.
  */
 func (mgr *PodManager) DeleteAll() error {
+	log.Infof("DeleteAll called......")
 	if len(mgr.podNs) > 0 {
-		log.Infof("Deleting all pods created by the pod manager...")
-		for name, _ := range mgr.podNs {
+		// for name, _ := range mgr.podNs {
+		        log.Infof("Deleting all pods created by the pod manager...")
 			// Just use tid 0 so that the first client is used to delete all pods
-			mgr.Delete(ActionSpec{
-				Name: name,
+			mgr.DeleteAllPods(ActionSpec{
 				Tid:  0})
-		}
+		        log.Infof("Deleting all pods created by the pod manager - done")
+		//}
 		mgr.podNs = make(map[string]string, 0)
 	} else {
 		log.Infof("Found no pod to delete, maybe they have already been deleted.")
 	}
 
+	log.Infof("Deleting namespace %s", mgr.namespace)
 	if mgr.namespace != apiv1.NamespaceDefault {
 		mgr.client.CoreV1().Namespaces().Delete(mgr.namespace, nil)
 	}
@@ -814,6 +824,7 @@ func (mgr *PodManager) DeleteAll() error {
 	// Delete other non default namespaces
 	for ns, _ := range mgr.nsSet {
 		if ns != apiv1.NamespaceDefault {
+	                log.Infof("Deleting namespace %s", ns)
 			mgr.client.CoreV1().Namespaces().Delete(ns, nil)
 		}
 	}
@@ -1268,7 +1279,6 @@ func (mgr *PodManager) CalculateStats() {
 
 
 	for p, ct := range mgr.createTimes {
-		log.Infof("scheduleTimesFromConditions: %v", mgr.scheduleTimesFromConditions)
 		if st, ok := mgr.scheduleTimesFromConditions[p]; ok {
 			createToScheduleFromConditions = append(createToScheduleFromConditions, st.Time.Sub(ct.Time))
 		}
